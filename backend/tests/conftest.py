@@ -21,14 +21,17 @@ def _create_test_database_if_missing() -> None:
         settings.database_url.set(database="postgres"),
         isolation_level="AUTOCOMMIT",
     )
-    with admin_engine.connect() as connection:
-        exists = connection.execute(
-            text("SELECT 1 FROM pg_database WHERE datname = :name"),
-            {"name": TEST_DB_NAME},
-        ).scalar()
-        if not exists:
-            connection.execute(text(f'CREATE DATABASE "{TEST_DB_NAME}"'))
-    admin_engine.dispose()
+    try:
+        with admin_engine.connect() as connection:
+            exists = connection.execute(
+                text("SELECT 1 FROM pg_database WHERE datname = :name"),
+                {"name": TEST_DB_NAME},
+            ).scalar()
+
+            if not exists:
+                connection.execute(text(f'CREATE DATABASE "{TEST_DB_NAME}"'))
+    finally:
+        admin_engine.dispose()
 
 
 @pytest.fixture(scope="session")
@@ -36,11 +39,14 @@ def test_engine() -> Iterator[Engine]:
     """Build fresh tables in the test database once per test run."""
     _create_test_database_if_missing()
     engine = create_engine(TEST_DATABASE_URL)
-    Base.metadata.drop_all(engine)
-    Base.metadata.create_all(engine)
-    yield engine
-    Base.metadata.drop_all(engine)
-    engine.dispose()
+
+    try:
+        Base.metadata.drop_all(engine)
+        Base.metadata.create_all(engine)
+        yield engine
+    finally:
+        Base.metadata.drop_all(engine)
+        engine.dispose()
 
 
 @pytest.fixture
@@ -48,12 +54,14 @@ def db_session(test_engine: Engine) -> Iterator[Session]:
     """A session whose changes are rolled back after every test."""
     connection = test_engine.connect()
     transaction = connection.begin()
+
     session = Session(
         bind=connection,
         join_transaction_mode="create_savepoint",
         autoflush=False,
         expire_on_commit=False,
     )
+
     try:
         yield session
     finally:
@@ -70,6 +78,9 @@ def client(db_session: Session) -> Iterator[TestClient]:
         yield db_session
 
     app.dependency_overrides[get_db] = override_get_db
-    with TestClient(app) as test_client:
-        yield test_client
-    app.dependency_overrides.clear()
+
+    try:
+        with TestClient(app) as test_client:
+            yield test_client
+    finally:
+        app.dependency_overrides.pop(get_db, None)
